@@ -52,3 +52,20 @@
 ## Hypothèses et limites
 * **Hypothèses :** Les passagers se dirigent sans erreur vers leur siège, ne remontent jamais l'allée à contresens, et les groupes voyageant ensemble (familles) ne sont pas modélisés, ce qui accélère artificiellement l'installation.
 * **Limites :** Les résultats dépendent fortement de la distribution des temps de rangement des bagages, paramètre très variable en réalité. En l'absence de données terrain privées pour valider, le modèle dépend d'une validation croisée avec la littérature existante, limitant sa validité externe.
+
+---
+
+## Architecture et Modélisation multi-agents (NetLogo)
+
+Le modèle est découpé de manière modulaire via des fichiers `.nls` inclus :
+
+* **`model/airplane_boarding.nlogox`** : Modèle principal (interface graphique, contrôleur `setup` / `go`, variables globales, widgets et expériences BehaviorSpace).
+* **`model/environment.nls`** : Chargement des plans cabines depuis les CSV (`A320` et `B737`), gestion de la grille, rendu visuel et étiquetage.
+* **`model/passengers.nls`** : Modélisation des agents passagers (`breed [ passengers passenger ]`), attributs, génération selon taux d'occupation et bagages, déplacements dans l'allée, arrêts de rangement et installation aux sièges.
+* **`model/strategies.nls`** : Architecture modulaire et extensible pour l'ordonnancement de la file d'embarquement.
+
+### Stratégies d'embarquement implémentées
+1. **Aléatoire (`random`)** : Les passagers se présentent à la porte dans un ordre aléatoire, sans consigne de rangée ni de siège.
+2. **Avant vers Arrière (`front-to-back`)** : Priorité aux rangées avant (1, 2, ...). Les passagers de l'avant montent en premier, puis ceux de l'arrière.
+3. **Arrière vers Avant (`back-to-front`)** : Priorité aux rangées arrière (32, 31, ...). Les passagers du fond montent en premier, puis ceux de l'avant.
+4. **WilMA (`wilma`)** : *Window-Middle-Aisle*. Priorité aux hublots (A, F), puis milieu (B, E), puis couloirs (C, D).

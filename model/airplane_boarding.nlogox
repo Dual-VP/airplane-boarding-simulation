@@ -1,9 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <model version="NetLogo 7.0.4" snapToGrid="true">
-  <code><![CDATA[;; ==============================================================================
-;; SIMULATION D'EMBARQUEMENT D'UN AVION COMMERCIAL
-;; Module d'initialisation de l'environnement depuis fichiers CSV
-;; ==============================================================================
+  <code><![CDATA[__includes [ "environment.nls" "passengers.nls" "strategies.nls" ]
 
 extensions [ csv ]
 
@@ -11,282 +8,179 @@ extensions [ csv ]
 ;; Variables globales
 ;; ------------------------------------------------------------------------------
 globals [
-  ;; Variables d'interface (automatiquement définies par les widgets) :
-  ;; aircraft-type     -> Chooser ("A320", "B737")
-  ;; show-seat-labels? -> Switch (true / false)
+  ;; Les variables d'interface sont automatiquement créées par leurs widgets :
+  ;; aircraft-type, boarding-strategy, occupancy-rate, luggage-percentage,
+  ;; min-luggage-delay, max-luggage-delay, show-seat-labels?
 
-  ;; Statistiques de la cabine chargée
-  total-seats          ;; Nombre total de sièges détectés
-  cabin-length         ;; Nombre de rangées physiques (axe longitudinal Y)
-  cabin-width          ;; Nombre de colonnes physiques (axe transversal X)
-  door-patch           ;; Patch représentant la porte d'embarquement
-  total-seat-rows      ;; Nombre de rangées commerciales différentes
+  ;; Métriques & géométrie de l'environnement
+  total-seats                ;; Nombre total de sièges détectés dans la cabine
+  cabin-length               ;; Longueur en rangées physiques (axe Y)
+  cabin-width                ;; Largeur en colonnes physiques (axe X)
+  door-patch                 ;; Patch représentant la porte d'embarquement
+  total-seat-rows            ;; Nombre de rangées commerciales distinctes
+
+  ;; File d'attente & dynamique d'embarquement
+  boarding-queue             ;; Liste ordonnée des agents passagers en attente d'entrer
+  total-interference-ticks   ;; Cumul des secondes passées bloqué dans l'allée
+  boarding-completed?        ;; Booléen : vrai quand tous les passagers sont assis
 ]
 
 ;; ------------------------------------------------------------------------------
-;; Propriétés des patchs (cellules de l'environnement)
+;; Propriétés des patchs (cellules de la cabine)
 ;; ------------------------------------------------------------------------------
 patches-own [
-  patch-type           ;; "wall", "aisle", "seat", "door"
-  seat-id              ;; Identifiant commercial du siège (ex: "12A", "1D"), "" si non-siège
-  seat-row             ;; Numéro de rangée commerciale (ex: 12), 0 si non-siège
-  seat-letter          ;; Lettre du siège ("A" à "F"), "" si non-siège
-  is-exit-row?         ;; Booléen : vraie pour les rangées de sortie de secours (extra legroom)
-  is-business?         ;; Booléen : vraie pour les sièges Business (rangées 1-3 sur 737)
-  occupied?            ;; Booléen : vrai si un passager est assis ou présent sur le patch
+  patch-type                 ;; "wall", "aisle", "seat", "door"
+  seat-id                    ;; Identifiant commercial du siège (ex: "12A"), "" si non-siège
+  seat-row                   ;; Numéro de rangée commerciale (ex: 12), 0 si non-siège
+  seat-letter                ;; Lettre du siège ("A" à "F"), "" si non-siège
+  is-exit-row?               ;; Booléen : vrai pour les issues de secours
+  is-business?               ;; Booléen : vrai pour les sièges Business (B737 rangées 1-3)
+  occupied?                  ;; Booléen : vrai si un passager est assis ou présent
 ]
 
-;; ------------------------------------------------------------------------------
-;; Procédure principale de configuration
-;; ------------------------------------------------------------------------------
+;; ==============================================================================
+;; Procédure principale de configuration (Setup)
+;; ==============================================================================
 to setup
+  ;; Conserver les choix de widgets avant clear-all (pour exécution headless & BehaviorSpace)
+  let chosen-aircraft aircraft-type
+  let chosen-strategy boarding-strategy
+  let chosen-occupancy occupancy-rate
+  let chosen-luggage luggage-percentage
+  let chosen-min-delay min-luggage-delay
+  let chosen-max-delay max-luggage-delay
+  let chosen-labels show-seat-labels?
+
   clear-all
-  reset-ticks
 
-  ;; Par défaut si non défini par l'interface
-  if aircraft-type = 0 or aircraft-type = "" [
-    set aircraft-type "A320"
-  ]
+  ;; Rétablir ou initialiser par défaut
+  ifelse chosen-aircraft != 0 and chosen-aircraft != "" [ set aircraft-type chosen-aircraft ] [ set aircraft-type "A320" ]
+  ifelse chosen-strategy != 0 and chosen-strategy != "" [ set boarding-strategy chosen-strategy ] [ set boarding-strategy "random" ]
+  ifelse chosen-occupancy != 0 [ set occupancy-rate chosen-occupancy ] [ set occupancy-rate 100 ]
+  ifelse chosen-luggage != 0 [ set luggage-percentage chosen-luggage ] [ set luggage-percentage 80 ]
+  ifelse chosen-min-delay != 0 [ set min-luggage-delay chosen-min-delay ] [ set min-luggage-delay 5 ]
+  ifelse chosen-max-delay != 0 [ set max-luggage-delay chosen-max-delay ] [ set max-luggage-delay 15 ]
+  ifelse is-boolean? chosen-labels [ set show-seat-labels? chosen-labels ] [ set show-seat-labels? true ]
 
-  ;; Charger l'environnement sélectionné
+  set total-interference-ticks 0
+  set boarding-completed? false
+
+  ;; 1. Charger la cabine de l'avion sélectionné
   load-aircraft-environment aircraft-type
 
-  ;; Mettre à jour l'affichage
+  ;; 2. Mettre à jour l'affichage graphique de la cabine
   update-visuals
 
-  ;; Afficher le résumé dans le centre de commande
+  ;; 3. Générer et ordonnancer les agents passagers selon la stratégie choisie
+  setup-passengers
+
+  ;; 4. Initialiser le compteur temporel
+  reset-ticks
+
+  ;; 5. Bilan console
   print-cabin-summary
+  print-passengers-summary
 end
 
-;; ------------------------------------------------------------------------------
-;; Chargement de l'avion sélectionné
-;; ------------------------------------------------------------------------------
-to load-aircraft-environment [ a-type ]
-  let grid-filename ""
-  let labels-filename ""
-
-  ifelse a-type = "B737" [
-    set grid-filename resolve-data-path "B737_cabin.csv"
-    set labels-filename resolve-data-path "B737_cabin_labels.csv"
-  ] [
-    set grid-filename resolve-data-path "A320_cabin.csv"
-    set labels-filename resolve-data-path "A320_cabin_labels.csv"
+;; ==============================================================================
+;; Procédure principale d'exécution (Go - 1 seconde / 1 tick)
+;; ==============================================================================
+to go
+  ;; Arrêt automatique si l'embarquement est terminé
+  if boarding-completed? [
+    stop
   ]
 
-  ;; Charger les matrices brutes CSV
-  let raw-grid csv:from-file grid-filename
-  let raw-labels csv:from-file labels-filename
+  ;; 1. Mettre à jour les passagers déjà à l'intérieur de l'avion
+  update-passengers
 
-  set cabin-length length raw-grid
-  set cabin-width length (item 0 raw-grid)
+  ;; 2. Faire entrer le passager suivant si la porte est libre
+  spawn-next-passenger-from-queue
 
-  ;; Redimensionner le monde NetLogo aux dimensions exactes de la cabine
-  ;; X : de 0 à (cabin-width - 1) -> 9 colonnes (0 à 8)
-  ;; Y : de 0 à (cabin-length - 1) -> front de l'avion en haut (max-pycor)
-  resize-world 0 (cabin-width - 1) 0 (cabin-length - 1)
+  ;; 3. Vérifier si tous les passagers sont assis
+  check-boarding-completion
 
-  ;; Remplir les patchs depuis les fichiers CSV
-  let row-idx 0
-  foreach raw-grid [ grid-row-data ->
-    let labels-row-data item row-idx raw-labels
-    let col-idx 0
-
-    ;; En NetLogo, Y croît de bas en haut :
-    ;; La première ligne du CSV (index 0 = cockpit / avant) correspond au haut (max-pycor)
-    let y-cor (cabin-length - 1 - row-idx)
-
-    foreach grid-row-data [ cell-value ->
-      let label-value item col-idx labels-row-data
-
-      ask patch col-idx y-cor [
-        set occupied? false
-        set is-exit-row? false
-        set is-business? false
-        set seat-id ""
-        set seat-row 0
-        set seat-letter ""
-
-        ;; Décoder le type de patch numérique
-        (ifelse
-          cell-value = 0 [
-            set patch-type "wall"
-          ]
-          cell-value = 1 [
-            set patch-type "aisle"
-          ]
-          cell-value = 2 [
-            set patch-type "seat"
-            set seat-id (word label-value)
-
-            ;; Extraire le numéro de rangée et la lettre du siège
-            if length seat-id >= 2 [
-              let last-char last seat-id
-              set seat-letter last-char
-              let row-str substring seat-id 0 (length seat-id - 1)
-              set seat-row read-from-string row-str
-            ]
-
-            ;; Marquer les sorties de secours et la classe affaires
-            if a-type = "A320" and (seat-row = 12 or seat-row = 14) [
-              set is-exit-row? true
-            ]
-            if a-type = "B737" [
-              if (seat-row = 11 or seat-row = 12) [
-                set is-exit-row? true
-              ]
-              if (seat-row <= 3) [
-                set is-business? true
-              ]
-            ]
-          ]
-          cell-value = 3 [
-            set patch-type "door"
-            set door-patch self
-          ]
-          [
-            set patch-type "wall"
-          ]
-        )
-      ]
-      set col-idx col-idx + 1
-    ]
-    set row-idx row-idx + 1
-  ]
-
-  ;; Mettre à jour les statistiques
-  set total-seats count patches with [ patch-type = "seat" ]
-  set total-seat-rows length remove-duplicates [ seat-row ] of patches with [ patch-type = "seat" ]
-end
-
-;; ------------------------------------------------------------------------------
-;; Résolution des chemins de fichiers (robuste selon l'emplacement d'exécution)
-;; ------------------------------------------------------------------------------
-to-report resolve-data-path [ filename ]
-  if file-exists? filename [ report filename ]
-  if file-exists? (word "data/" filename) [ report (word "data/" filename) ]
-  if file-exists? (word "../data/" filename) [ report (word "../data/" filename) ]
-  error (word "Fichier introuvable : " filename)
-end
-
-;; ------------------------------------------------------------------------------
-;; Coloration et rendu visuel de la cabine
-;; ------------------------------------------------------------------------------
-to update-visuals
-  ask patches [
-    (ifelse
-      patch-type = "wall" [
-        set pcolor gray - 1       ;; Fuselage / cloisons : gris
-      ]
-      patch-type = "aisle" [
-        set pcolor black          ;; Allée centrale : noir
-      ]
-      patch-type = "door" [
-        set pcolor green + 1      ;; Porte d'entrée : vert vif
-      ]
-      patch-type = "seat" [
-        ifelse is-business? [
-          set pcolor magenta      ;; Classe Affaires (B737) : magenta
-        ] [
-          ifelse is-exit-row? [
-            set pcolor cyan       ;; Sortie de secours (extra legroom) : cyan
-          ] [
-            set pcolor sky        ;; Classe Économique standard : bleu ciel
-          ]
-        ]
-      ]
-      [ set pcolor white ]
-    )
-
-    ;; Étiquettes des sièges (optionnel)
-    ifelse show-seat-labels? and patch-type = "seat" [
-      set plabel seat-id
-      set plabel-color white
-    ] [
-      set plabel ""
-    ]
-  ]
-end
-
-;; ------------------------------------------------------------------------------
-;; Basculer l'affichage des identifiants de sièges
-;; ------------------------------------------------------------------------------
-to toggle-labels
-  set show-seat-labels? not show-seat-labels?
-  update-visuals
-end
-
-;; ------------------------------------------------------------------------------
-;; Utilitaires / Rapporteurs pour les agents passagers
-;; ------------------------------------------------------------------------------
-to-report get-seat [ target-id ]
-  report one-of patches with [ seat-id = target-id ]
-end
-
-to-report get-aisle-patch-for-seat [ target-id ]
-  let target get-seat target-id
-  if target = nobody [ report nobody ]
-  report patch 4 ([ pycor ] of target)
-end
-
-;; ------------------------------------------------------------------------------
-;; Affichage du résumé en console
-;; ------------------------------------------------------------------------------
-to print-cabin-summary
-  print "========================================================"
-  print (word " Cabine chargee : " aircraft-type)
-  print (word " Dimensions     : " cabin-width " colonnes x " cabin-length " rangees")
-  print (word " Total sieges   : " total-seats " places")
-  print (word " Rangees sieges : " total-seat-rows " rangees distinctes")
-  if door-patch != nobody [
-    print (word " Porte d'entree : [" [pxcor] of door-patch ", " [pycor] of door-patch "]")
-  ]
-  print (word " Sieges issues  : " count patches with [ is-exit-row? ])
-  if aircraft-type = "B737" [
-    print (word " Sieges affaires: " count patches with [ is-business? ])
-  ]
-  print "========================================================"
+  ;; 4. Avancer le temps de simulation
+  tick
 end
 ]]></code>
   <widgets>
-    <view x="210" wrappingAllowedX="false" y="10" frameRate="30.0" minPycor="0" height="630" showTickCounter="true" patchSize="15.0" fontSize="10" wrappingAllowedY="false" width="165" tickCounterLabel="ticks" maxPycor="34" updateMode="1" maxPxcor="8" minPxcor="0"></view>
-    <button x="10" y="10" height="40" disableUntilTicks="false" forever="false" kind="Observer" width="180" display="Setup Environnement">setup</button>
-    <chooser x="10" y="60" height="60" variable="aircraft-type" current="1" width="180" display="aircraft-type">
+    <view x="205" wrappingAllowedX="false" y="10" frameRate="30.0" minPycor="0" height="640" showTickCounter="true" patchSize="15.0" fontSize="10" wrappingAllowedY="false" width="180" tickCounterLabel="ticks (secondes)" maxPycor="34" updateMode="1" maxPxcor="8" minPxcor="0"></view>
+    <button x="10" y="10" height="35" disableUntilTicks="false" forever="false" kind="Observer" width="180" display="Setup Simulation">setup</button>
+    <button x="10" y="50" height="35" disableUntilTicks="true" forever="true" kind="Observer" width="90" display="Embarquer">go</button>
+    <button x="105" y="50" height="35" disableUntilTicks="true" forever="false" kind="Observer" width="85" display="1 Pas">go</button>
+    <chooser x="10" y="95" height="45" variable="aircraft-type" current="0" width="180" display="Modèle d'avion">
       <choice type="string" value="A320"></choice>
       <choice type="string" value="B737"></choice>
     </chooser>
-    <switch x="10" y="115" height="40" on="true" variable="show-seat-labels?" width="180" display="show-seat-labels?"></switch>
-    <button x="10" y="160" height="35" disableUntilTicks="false" forever="false" kind="Observer" width="180" display="Basculer étiquettes">toggle-labels</button>
-    <monitor x="10" precision="0" y="210" height="60" fontSize="11" width="180" display="Total Sièges">total-seats</monitor>
-    <monitor x="10" precision="0" y="265" height="60" fontSize="11" width="180" display="Rangées de Sièges">total-seat-rows</monitor>
-    <monitor x="10" precision="0" y="320" height="60" fontSize="11" width="180" display="Longueur Cabine">cabin-length</monitor>
-    <monitor x="10" precision="0" y="375" height="60" fontSize="11" width="180" display="Largeur Cabine">cabin-width</monitor>
+    <chooser x="10" y="145" height="45" variable="boarding-strategy" current="0" width="180" display="Stratégie d'embarquement">
+      <choice type="string" value="random"></choice>
+      <choice type="string" value="front-to-back"></choice>
+      <choice type="string" value="back-to-front"></choice>
+      <choice type="string" value="wilma"></choice>
+    </chooser>
+    <slider x="10" step="5" y="195" max="100" width="180" display="Taux de remplissage" height="45" min="10" direction="Horizontal" default="100.0" variable="occupancy-rate" units="%"></slider>
+    <slider x="10" step="5" y="245" max="100" width="180" display="Passagers avec bagage" height="45" min="0" direction="Horizontal" default="80.0" variable="luggage-percentage" units="%"></slider>
+    <slider x="10" step="1" y="295" max="30" width="180" display="Rangement min" height="45" min="1" direction="Horizontal" default="5.0" variable="min-luggage-delay" units="s"></slider>
+    <slider x="10" step="1" y="345" max="30" width="180" display="Rangement max" height="45" min="1" direction="Horizontal" default="15.0" variable="max-luggage-delay" units="s"></slider>
+    <switch x="10" y="395" height="35" on="true" variable="show-seat-labels?" width="180" display="Afficher étiquettes"></switch>
+    <button x="10" y="435" height="30" disableUntilTicks="false" forever="false" kind="Observer" width="180" display="Basculer étiquettes">toggle-labels</button>
+    <monitor x="400" precision="0" y="10" height="45" fontSize="11" width="140" display="Temps écoulé (s)">ticks</monitor>
+    <monitor x="545" precision="0" y="10" height="45" fontSize="11" width="140" display="Progression (%)">boarding-progress-percent</monitor>
+    <monitor x="400" precision="0" y="60" height="45" fontSize="11" width="140" display="Passagers assis">passengers-seated-count</monitor>
+    <monitor x="545" precision="0" y="60" height="45" fontSize="11" width="140" display="En file d'attente">passengers-waiting-count</monitor>
+    <monitor x="400" precision="0" y="110" height="45" fontSize="11" width="140" display="Dans l'allée">passengers-in-plane-count</monitor>
+    <monitor x="545" precision="0" y="110" height="45" fontSize="11" width="140" display="En rangement">passengers-stowing-count</monitor>
+    <monitor x="400" precision="0" y="160" height="45" fontSize="11" width="140" display="Interférences (s)">total-interference-ticks</monitor>
+    <monitor x="545" precision="1" y="160" height="45" fontSize="11" width="140" display="Attente moy (s)">mean-passenger-wait-time</monitor>
+    <monitor x="400" precision="0" y="210" height="45" fontSize="11" width="140" display="Total Sièges">total-seats</monitor>
+    <monitor x="545" precision="0" y="210" height="45" fontSize="11" width="140" display="Rangées Sièges">total-seat-rows</monitor>
+    <plot x="400" autoPlotX="true" yMax="180.0" autoPlotY="true" yAxis="Passagers" y="265" xMin="0.0" height="195" legend="false" xMax="600.0" yMin="0.0" width="285" xAxis="Temps (s)" display="Dynamique d'embarquement">
+      <setup></setup>
+      <update></update>
+      <pen interval="1.0" mode="0" display="Assis" color="-13345367" legend="true">
+        <setup></setup>
+        <update>plot passengers-seated-count</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="En attente" color="-267413" legend="true">
+        <setup></setup>
+        <update>plot passengers-waiting-count</update>
+      </pen>
+      <pen interval="1.0" mode="0" display="Dans allée" color="-16776961" legend="true">
+        <setup></setup>
+        <update>plot passengers-in-plane-count</update>
+      </pen>
+    </plot>
   </widgets>
-  <info>## MODÈLE D'ENVIRONNEMENT CABINE AVION (NETLOGO)
+  <info><![CDATA[## MODÈLE D'EMBARQUEMENT D'UN AVION COMMERCIAL (NETLOGO)
 
 ### Description
-Ce modèle initialise l'environnement spatial 2D d'une cabine d'avion monocouloir depuis des fichiers CSV de données ouvertes (SeatMaps / constructeurs).
+Ce modèle multi-agents simule l'embarquement des passagers dans un avion monocouloir commercial (Airbus A320 ou Boeing 737) à partir de plans de cabine réels au format CSV.
 
-### Appareils supportés :
-1. **Airbus A320 (Air France)** : 178 sièges économiques (configuration V.2 "Métro").
-   - Sorties de secours aux rangées 12 et 14 (extra legroom).
-   - Rangée 13 absente (superstition).
-   - Rangée 31 avec siège C absent (5 sièges).
-   - Rangée 32 écourtée (2 sièges A et B uniquement).
+### Stratégies d'embarquement implémentées :
+1. **Aléatoire (`random`)** : Les passagers embarquent dans un ordre totalement aléatoire. Représente l'embarquement libre / sans consigne.
+2. **Avant vers Arrière (`front-to-back`)** : Les passagers des rangées avant (rangée 1, 2, ...) montent en premier, puis ceux de l'arrière.
+3. **Arrière vers Avant (`back-to-front`)** : Les passagers du fond de l'appareil montent en premier, puis ceux de l'avant.
+4. **WilMA (`wilma`)** : Window-Middle-Aisle. Les passagers aux hublots (A, F) montent en premier, puis les sièges du milieu (B, E), puis les couloirs (C, D).
 
-2. **Boeing 737-400 (Aero Contractors)** : 144 sièges.
-   - Rangées 1-3 : Classe Affaires en 2-2 (12 sièges).
-   - Rangées 4-23, 25-26 : Classe Économique en 3-3 (132 sièges).
-   - Rangée 24 absente.
-   - Sorties de secours aux rangées 11 et 12.
+### Extensibilité :
+Le modèle utilise un pattern Stratégie dans `strategies.nls`. Pour ajouter une nouvelle stratégie ultérieurement :
+1. Créer le rapporteur de tri dans `strategies.nls` : `to-report strategy-<nom> [ plist ]`
+2. Ajouter la condition dans le dispatcher `sort-passengers-by-strategy`
+3. Ajouter le nom dans `available-strategies` et dans le widget Chooser.
 
-### Échelle spatiale :
-- 1 patch = 0,5 mètre (largeur d'un siège / encombrement d'un passager).
+### Agents Passagers :
+Chaque passager possède :
+- Un siège cible unique (rangée, lettre, patch physique).
+- Un bagage cabine selon la probabilité configurée (`luggage-percentage`).
+- Un temps de rangement stochastique (`luggage-stow-time` entre min et max).
+- Un état : en attente à la porte, en marche dans l'allée, en rangement, en déplacement vers le siège, assis.
 
-### Utilisation :
-1. Choisissez l'appareil dans le menu déroulant (`aircraft-type`).
-2. Cliquez sur `Setup Environnement`.
-3. Utilisez le bouton ou le commutateur `Afficher étiquettes` pour voir les numéros de sièges.
-</info>
+### Échelle :
+- 1 patch = 0,5 mètre.
+- 1 tick = 1 seconde.
+- Vitesse libre dans l'allée = 0,5 m/s (1 patch / tick).
+]]></info>
   <turtleShapes>
     <shape name="default" rotatable="true" editableColorIndex="0">
       <polygon color="-1920102913" filled="true" marked="true">
@@ -1122,18 +1016,84 @@ Ce modèle initialise l'environnement spatial 2D d'une cabine d'avion monocouloi
   </linkShapes>
   <previewCommands>setup repeat 75 [ go ]</previewCommands>
   <experiments>
-    <experiment name="test-a320" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1">
+    <experiment name="test-a320-random" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="3000">
       <setup>set aircraft-type "A320"
+set boarding-strategy "random"
+set occupancy-rate 100
+set luggage-percentage 80
+set min-luggage-delay 5
+set max-luggage-delay 15
 setup</setup>
+      <go>go</go>
       <metrics>
-        <metric>total-seats</metric>
+        <metric>ticks</metric>
+        <metric>passengers-seated-count</metric>
+        <metric>total-interference-ticks</metric>
+        <metric>mean-passenger-wait-time</metric>
       </metrics>
     </experiment>
-    <experiment name="test-b737" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="1">
-      <setup>set aircraft-type "B737"
+    <experiment name="test-a320-front-to-back" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="3000">
+      <setup>set aircraft-type "A320"
+set boarding-strategy "front-to-back"
+set occupancy-rate 100
+set luggage-percentage 80
+set min-luggage-delay 5
+set max-luggage-delay 15
 setup</setup>
+      <go>go</go>
       <metrics>
-        <metric>total-seats</metric>
+        <metric>ticks</metric>
+        <metric>passengers-seated-count</metric>
+        <metric>total-interference-ticks</metric>
+        <metric>mean-passenger-wait-time</metric>
+      </metrics>
+    </experiment>
+    <experiment name="test-a320-back-to-front" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="3000">
+      <setup>set aircraft-type "A320"
+set boarding-strategy "back-to-front"
+set occupancy-rate 100
+set luggage-percentage 80
+set min-luggage-delay 5
+set max-luggage-delay 15
+setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>passengers-seated-count</metric>
+        <metric>total-interference-ticks</metric>
+        <metric>mean-passenger-wait-time</metric>
+      </metrics>
+    </experiment>
+    <experiment name="test-a320-wilma" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="3000">
+      <setup>set aircraft-type "A320"
+set boarding-strategy "wilma"
+set occupancy-rate 100
+set luggage-percentage 80
+set min-luggage-delay 5
+set max-luggage-delay 15
+setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>passengers-seated-count</metric>
+        <metric>total-interference-ticks</metric>
+        <metric>mean-passenger-wait-time</metric>
+      </metrics>
+    </experiment>
+    <experiment name="test-b737-back-to-front" repetitions="1" sequentialRunOrder="true" runMetricsEveryStep="false" timeLimit="3000">
+      <setup>set aircraft-type "B737"
+set boarding-strategy "back-to-front"
+set occupancy-rate 100
+set luggage-percentage 80
+set min-luggage-delay 5
+set max-luggage-delay 15
+setup</setup>
+      <go>go</go>
+      <metrics>
+        <metric>ticks</metric>
+        <metric>passengers-seated-count</metric>
+        <metric>total-interference-ticks</metric>
+        <metric>mean-passenger-wait-time</metric>
       </metrics>
     </experiment>
   </experiments>

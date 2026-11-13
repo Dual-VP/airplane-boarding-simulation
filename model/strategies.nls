@@ -1,0 +1,133 @@
+;; ==============================================================================
+;; SIMULATION D'EMBARQUEMENT D'UN AVION COMMERCIAL
+;; Module des stratégies d'embarquement (Boarding Strategies)
+;; Architecture extensible pour ordonnancer la file d'attente des passagers
+;; ==============================================================================
+
+;; ------------------------------------------------------------------------------
+;; Liste des stratégies reconnues par le modèle
+;; Utilisé pour la validation, les widgets d'interface et les plans d'expériences
+;; ------------------------------------------------------------------------------
+to-report available-strategies
+  report [
+    "random"
+    "front-to-back"
+    "back-to-front"
+    "wilma"
+  ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Point d'entrée principal : Dispatcher de stratégie (Pattern Stratégie)
+;;
+;; POUR AJOUTER FACILEMENT UNE NOUVELLE STRATÉGIE ULTÉRIEUREMENT :
+;;   1. Écrire le rapporteur de tri ci-dessous : `to-report strategy-<nom> [ plist ]`
+;;   2. Ajouter une branche dans le `(ifelse ...)` ci-dessous :
+;;        `strat = "<nom>" [ report strategy-<nom> plist ]`
+;;   3. Ajouter le nom dans la liste de `available-strategies` ci-dessus.
+;; ------------------------------------------------------------------------------
+to-report sort-passengers-by-strategy [ strat plist ]
+  (ifelse
+    strat = "random" or strat = "aléatoire" or strat = "aleatoire" [
+      report strategy-random plist
+    ]
+    strat = "front-to-back" [
+      report strategy-front-to-back plist
+    ]
+    strat = "back-to-front" [
+      report strategy-back-to-front plist
+    ]
+    strat = "wilma" or strat = "window-middle-aisle" [
+      report strategy-wilma plist
+    ]
+    ;; -- Exemple d'extension future (ex: Steffen, par zones, etc.) --
+    ;; strat = "steffen" [ report strategy-steffen plist ]
+    [
+      error (word "Stratégie d'embarquement inconnue : '" strat "'. Stratégies supportées : " available-strategies)
+    ]
+  )
+end
+
+;; ==============================================================================
+;; 1. STRATÉGIE ALÉATOIRE (RANDOM)
+;; ==============================================================================
+;; Tous les passagers montent dans un ordre purement aléatoire, sans distinction
+;; de rangée ni de position de siège. Représente l'embarquement sans consigne.
+to-report strategy-random [ plist ]
+  report shuffle plist
+end
+
+;; ==============================================================================
+;; 2. STRATÉGIE AVANT VERS ARRIÈRE (FRONT-TO-BACK)
+;; ==============================================================================
+;; Les passagers assis à l'avant (petits numéros de rangée : 1, 2, ...) embarquent
+;; en premier. Les passagers de l'arrière (grands numéros) embarquent en dernier.
+;; Au sein d'une même rangée, l'ordre est aléatoire (départagé par tie-breaker).
+to-report strategy-front-to-back [ plist ]
+  report sort-by front-to-back-comparator plist
+end
+
+to-report front-to-back-comparator [ p1 p2 ]
+  let r1 [ seat-row-number ] of p1
+  let r2 [ seat-row-number ] of p2
+  ifelse r1 != r2 [
+    report r1 < r2
+  ] [
+    report [ boarding-tie-breaker ] of p1 < [ boarding-tie-breaker ] of p2
+  ]
+end
+
+;; ==============================================================================
+;; 3. STRATÉGIE ARRIÈRE VERS AVANT (BACK-TO-FRONT)
+;; ==============================================================================
+;; Les passagers assis au fond de l'appareil (grands numéros de rangée) embarquent
+;; en premier. Les rangées avant (petits numéros) embarquent en dernier.
+;; Au sein d'une même rangée, l'ordre est aléatoire (départagé par tie-breaker).
+to-report strategy-back-to-front [ plist ]
+  report sort-by back-to-front-comparator plist
+end
+
+to-report back-to-front-comparator [ p1 p2 ]
+  let r1 [ seat-row-number ] of p1
+  let r2 [ seat-row-number ] of p2
+  ifelse r1 != r2 [
+    report r1 > r2
+  ] [
+    report [ boarding-tie-breaker ] of p1 < [ boarding-tie-breaker ] of p2
+  ]
+end
+
+;; ==============================================================================
+;; 4. EXTENSION : WILMA (WINDOW - MIDDLE - AISLE)
+;; ==============================================================================
+;; Priorité 1 : Sièges hublot (A, F)
+;; Priorité 2 : Sièges milieu (B, E)
+;; Priorité 3 : Sièges couloir (C, D)
+;; À priorité égale, on embarque de l'arrière vers l'avant (Back-to-Front).
+to-report strategy-wilma [ plist ]
+  report sort-by wilma-comparator plist
+end
+
+to-report wilma-comparator [ p1 p2 ]
+  let g1 seat-group-code ([ seat-letter-code ] of p1)
+  let g2 seat-group-code ([ seat-letter-code ] of p2)
+  if g1 != g2 [
+    report g1 < g2
+  ]
+  let r1 [ seat-row-number ] of p1
+  let r2 [ seat-row-number ] of p2
+  ifelse r1 != r2 [
+    report r1 > r2
+  ] [
+    report [ boarding-tie-breaker ] of p1 < [ boarding-tie-breaker ] of p2
+  ]
+end
+
+;; Code de priorité selon la lettre du siège :
+;; 1 = Hublot (A, F), 2 = Milieu (B, E), 3 = Couloir (C, D)
+to-report seat-group-code [ letter ]
+  if letter = "A" or letter = "F" [ report 1 ]
+  if letter = "B" or letter = "E" [ report 2 ]
+  if letter = "C" or letter = "D" [ report 3 ]
+  report 4
+end

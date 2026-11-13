@@ -1,0 +1,304 @@
+;; ==============================================================================
+;; SIMULATION D'EMBARQUEMENT D'UN AVION COMMERCIAL
+;; Module des agents passagers (Passenger Agents)
+;; Définition de la race, des attributs, de la génération et des comportements
+;; ==============================================================================
+
+;; ------------------------------------------------------------------------------
+;; Déclaration de la race (breed)
+;; ------------------------------------------------------------------------------
+breed [ passengers passenger ]
+
+;; ------------------------------------------------------------------------------
+;; Attributs des passagers
+;; ------------------------------------------------------------------------------
+passengers-own [
+  ;; Attribution du siège
+  assigned-seat          ;; Patch correspondant au siège attribué (ex: patch 1 25)
+  target-seat-id         ;; Identifiant commercial du siège (ex: "14A", "2C")
+  seat-row-number        ;; Numéro de rangée commerciale (ex: 14)
+  seat-letter-code       ;; Lettre commerciale ("A" à "F")
+  target-aisle-patch     ;; Patch d'allée situé en face de la rangée (colonne 4)
+
+  ;; Gestion des bagages cabine
+  has-luggage?           ;; Booléen : vrai si le passager doit ranger un bagage dans les coffres
+  luggage-stow-time      ;; Durée nécessaire pour ranger le bagage (en secondes / ticks)
+  stow-timer             ;; Compteur décrémental du temps de rangement restant
+
+  ;; État et progression
+  passenger-state        ;; "waiting-gate", "moving-aisle", "stowing", "moving-to-seat", "seated"
+  boarding-rank          ;; Position d'appel dans la file d'embarquement (1 = premier à monter)
+  wait-time              ;; Nombre de ticks passés arrêté dans l'allée (bouchon / interférence)
+  entry-tick             ;; Tick d'entrée physique dans l'appareil (-1 si pas encore entré)
+  seated-tick            ;; Tick auquel le passager est installé à son siège (-1 si pas encore assis)
+  boarding-tie-breaker   ;; Valeur aléatoire uniforme [0, 1[ pour ordonner au sein d'une même rangée
+]
+
+;; ==============================================================================
+;; Procédure d'initialisation des agents passagers
+;; ==============================================================================
+to setup-passengers
+  ;; Réinitialiser les passagers précédents
+  ask passengers [ die ]
+  set boarding-queue []
+  set total-interference-ticks 0
+  set boarding-completed? false
+
+  ;; Identifier l'ensemble des sièges disponibles dans la cabine
+  let available-seats [ self ] of patches with [ patch-type = "seat" ]
+  let num-available length available-seats
+
+  ;; Calculer l'effectif selon le taux de remplissage choisi
+  let num-passengers round (num-available * (occupancy-rate / 100))
+  if num-passengers > num-available [ set num-passengers num-available ]
+  if num-passengers < 1 [ set num-passengers 1 ]
+
+  ;; Sélectionner aléatoirement les sièges qui seront occupés
+  let selected-seats sublist (shuffle available-seats) 0 num-passengers
+
+  ;; Créer un agent passager pour chaque siège retenu
+  foreach selected-seats [ seat-p ->
+    create-passengers 1 [
+      set assigned-seat seat-p
+      set target-seat-id [ seat-id ] of seat-p
+      set seat-row-number [ seat-row ] of seat-p
+      set seat-letter-code [ seat-letter ] of seat-p
+      set target-aisle-patch patch 4 ([ pycor ] of seat-p)
+
+      ;; Encombrement : bagage cabine selon la proportion configurée
+      set has-luggage? ((random-float 100.0) < luggage-percentage)
+      ifelse has-luggage? [
+        let min-d min (list min-luggage-delay max-luggage-delay)
+        let max-d max (list min-luggage-delay max-luggage-delay)
+        set luggage-stow-time min-d + random (max-d - min-d + 1)
+      ] [
+        set luggage-stow-time 0
+      ]
+
+      set stow-timer 0
+      set passenger-state "waiting-gate"
+      set boarding-rank 0
+      set wait-time 0
+      set entry-tick -1
+      set seated-tick -1
+      set boarding-tie-breaker random-float 1.0
+
+      ;; Aspect visuel initial (en attente hors de l'avion)
+      set shape "person"
+      set size 0.9
+      set color sky
+      set hidden? true
+      setxy 0 0
+    ]
+  ]
+
+  ;; Trier la file d'embarquement selon la stratégie sélectionnée
+  let all-p [ self ] of passengers
+  set boarding-queue sort-passengers-by-strategy boarding-strategy all-p
+
+  ;; Assigner le numéro d'ordre d'appel (boarding-rank)
+  let rank 1
+  foreach boarding-queue [ p ->
+    ask p [
+      set boarding-rank rank
+    ]
+    set rank rank + 1
+  ]
+end
+
+;; ==============================================================================
+;; Embarquement du passager suivant depuis la porte
+;; ==============================================================================
+to spawn-next-passenger-from-queue
+  if empty? boarding-queue or door-patch = nobody [ stop ]
+
+  ;; La porte ne peut accueillir un nouveau passager que si la case est libre
+  let door-occupied? any? (passengers-on door-patch) with [ not hidden? and passenger-state != "seated" ]
+
+  if not door-occupied? [
+    let next-p first boarding-queue
+    set boarding-queue but-first boarding-queue
+    ask next-p [
+      move-to door-patch
+      set hidden? false
+      set passenger-state "moving-aisle"
+      set entry-tick ticks
+      set heading 180              ;; Dirigé vers l'arrière de l'avion (Sud)
+      set color sky + 2
+    ]
+  ]
+end
+
+;; ==============================================================================
+;; Mise à jour des passagers à chaque pas de temps (tick)
+;; ==============================================================================
+to update-passengers
+  ;; 1. Traiter d'abord les passagers en cours de rangement ou de déplacement vers le siège
+  ;; Cela leur permet de libérer l'allée centrale sans retard artificiel
+  ask passengers with [ passenger-state = "stowing" ] [
+    update-passenger-stowing
+  ]
+
+  ask passengers with [ passenger-state = "moving-to-seat" ] [
+    update-passenger-moving-to-seat
+  ]
+
+  ;; 2. Déplacer les passagers marchant dans l'allée centrale
+  ;; On les met à jour par pycor croissant (du fond de l'avion vers la porte) :
+  ;; Le passager le plus avancé avance d'abord, ce qui libère la case pour celui qui le suit.
+  let aisle-passengers sort-by [ [p1 p2] -> [ pycor ] of p1 < [ pycor ] of p2 ]
+    (passengers with [ passenger-state = "moving-aisle" ])
+
+  foreach aisle-passengers [ p ->
+    ask p [
+      update-passenger-moving-aisle
+    ]
+  ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Comportement : Rangement du bagage en cabine
+;; ------------------------------------------------------------------------------
+to update-passenger-stowing
+  set stow-timer stow-timer - 1
+  set color orange                ;; Indicateur visuel : passager bloquant l'allée pour ranger
+
+  ;; Fin du rangement : passage à l'installation sur le siège
+  if stow-timer <= 0 [
+    set passenger-state "moving-to-seat"
+    set color yellow
+    ;; Dès la fin du rangement, le passager quitte l'allée centrale vers son siège
+    step-towards-seat
+  ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Comportement : Déplacement latéral vers le siège dans la rangée
+;; ------------------------------------------------------------------------------
+to update-passenger-moving-to-seat
+  step-towards-seat
+end
+
+to step-towards-seat
+  let target-x [ pxcor ] of assigned-seat
+
+  ifelse pxcor = target-x [
+    ;; Arrivé exactement sur le siège attribué
+    set passenger-state "seated"
+    set seated-tick ticks
+    set color green + 1           ;; Vert : passager convenablement assis
+    ask assigned-seat [ set occupied? true ]
+  ] [
+    ;; Avancer d'une cellule latérale vers le siège
+    let step-x (ifelse-value target-x < pxcor [ -1 ] [ 1 ])
+    let next-p patch (pxcor + step-x) pycor
+    move-to next-p
+
+    ;; Vérifier si le siège est atteint
+    if pxcor = target-x [
+      set passenger-state "seated"
+      set seated-tick ticks
+      set color green + 1
+      ask assigned-seat [ set occupied? true ]
+    ]
+  ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Comportement : Déplacement longitudinal dans l'allée centrale
+;; ------------------------------------------------------------------------------
+to update-passenger-moving-aisle
+  let target-y [ pycor ] of assigned-seat
+
+  ifelse pycor = target-y [
+    ;; Le passager est arrivé en face de sa rangée !
+    ifelse has-luggage? and luggage-stow-time > 0 [
+      set passenger-state "stowing"
+      set stow-timer luggage-stow-time
+      set color orange
+    ] [
+      ;; Pas de bagage : installation directe dans la rangée
+      set passenger-state "moving-to-seat"
+      set color yellow
+      step-towards-seat
+    ]
+  ] [
+    ;; Le passager doit continuer à descendre l'allée (vers le Sud, pycor - 1)
+    let next-patch patch 4 (pycor - 1)
+    let patch-blocked? (next-patch = nobody or any? (passengers-on next-patch) with [ not hidden? and passenger-state != "seated" ])
+
+    ifelse not patch-blocked? [
+      ;; L'allée est libre devant : le passager avance d'un patch (0,5 m en 1 s)
+      move-to next-patch
+      set color sky + 2
+
+      ;; S'il atteint sa rangée dès ce déplacement
+      if pycor = target-y [
+        ifelse has-luggage? and luggage-stow-time > 0 [
+          set passenger-state "stowing"
+          set stow-timer luggage-stow-time
+          set color orange
+        ] [
+          set passenger-state "moving-to-seat"
+          set color yellow
+          step-towards-seat
+        ]
+      ]
+    ] [
+      ;; L'allée est bloquée par un autre passager : interférence / temps d'attente !
+      set wait-time wait-time + 1
+      set total-interference-ticks total-interference-ticks + 1
+      set color red               ;; Rouge : passager ralenti / bloqué dans l'allée
+    ]
+  ]
+end
+
+;; ==============================================================================
+;; Détection de la fin de l'embarquement
+;; ==============================================================================
+to check-boarding-completion
+  if not boarding-completed? and count passengers > 0 and all? passengers [ passenger-state = "seated" ] [
+    set boarding-completed? true
+  ]
+end
+
+;; ==============================================================================
+;; Indicateurs & Métriques pour l'interface et les analyses
+;; ==============================================================================
+to-report passengers-seated-count
+  report count passengers with [ passenger-state = "seated" ]
+end
+
+to-report passengers-waiting-count
+  report length boarding-queue
+end
+
+to-report passengers-in-plane-count
+  report count passengers with [ not hidden? and passenger-state != "seated" ]
+end
+
+to-report passengers-stowing-count
+  report count passengers with [ passenger-state = "stowing" ]
+end
+
+to-report boarding-progress-percent
+  if count passengers = 0 [ report 0 ]
+  report round ((passengers-seated-count / count passengers) * 100)
+end
+
+to-report mean-passenger-wait-time
+  if count passengers = 0 [ report 0 ]
+  report precision (mean [ wait-time ] of passengers) 2
+end
+
+;; ------------------------------------------------------------------------------
+;; Résumé textuel des passagers dans la console
+;; ------------------------------------------------------------------------------
+to print-passengers-summary
+  print "--------------------------------------------------------"
+  print (word " Passagers créés     : " count passengers)
+  print (word " Stratégie d'appel  : " boarding-strategy)
+  print (word " Taux remplissage    : " occupancy-rate "%")
+  print (word " Avec bagage cabine  : " count passengers with [ has-luggage? ] " (" luggage-percentage "%)")
+  print "--------------------------------------------------------"
+end

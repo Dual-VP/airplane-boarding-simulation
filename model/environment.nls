@@ -3,61 +3,8 @@
 ;; Module d'initialisation de l'environnement depuis fichiers CSV (A320 & B737)
 ;; ==============================================================================
 
-extensions [ csv ]
-
 ;; ------------------------------------------------------------------------------
-;; Variables globales
-;; ------------------------------------------------------------------------------
-globals [
-  ;; Variables d'interface (à créer comme widgets dans NetLogo ou déclarer ici) :
-  ;; aircraft-type      ;; Chooser ("A320", "B737")
-  ;; show-seat-labels?  ;; Switch (true / false)
-
-  ;; Métriques & références de l'environnement
-  total-seats          ;; Nombre total de sièges détectés (178 pour A320, 144 pour B737)
-  cabin-length         ;; Nombre de rangées physiques (axe longitudinal Y : 41 pour A320, 35 pour B737)
-  cabin-width          ;; Nombre de colonnes physiques (axe transversal X : 9 colonnes)
-  door-patch           ;; Patch représentant la porte d'embarquement (point d'apparition)
-  total-seat-rows      ;; Nombre de rangées commerciales distinctes (31 pour A320, 25 pour B737)
-]
-
-;; ------------------------------------------------------------------------------
-;; Propriétés des patchs (cellules de la cabine)
-;; ------------------------------------------------------------------------------
-patches-own [
-  patch-type           ;; "wall", "aisle", "seat", "door"
-  seat-id              ;; Identifiant commercial du siège (ex: "12A", "1D"), "" si non-siège
-  seat-row             ;; Numéro de rangée commerciale (ex: 12), 0 si non-siège
-  seat-letter          ;; Lettre du siège ("A" à "F"), "" si non-siège
-  is-exit-row?         ;; Booléen : vrai pour les issues de secours (extra legroom)
-  is-business?         ;; Booléen : vrai pour les sièges Business (rangées 1-3 sur B737)
-  occupied?            ;; Booléen : vrai si un passager est assis ou présent sur le patch
-]
-
-;; ------------------------------------------------------------------------------
-;; Procédure principale de configuration
-;; ------------------------------------------------------------------------------
-to setup
-  clear-all
-  reset-ticks
-
-  ;; Valeur par défaut si non défini par un widget Chooser
-  if aircraft-type = 0 or aircraft-type = "" [
-    set aircraft-type "A320"
-  ]
-
-  ;; Chargement de la géométrie et des sièges depuis les CSV
-  load-aircraft-environment aircraft-type
-
-  ;; Coloration et étiquetage initial
-  update-visuals
-
-  ;; Affichage du bilan dans le centre de commande
-  print-cabin-summary
-end
-
-;; ------------------------------------------------------------------------------
-;; Procédure de chargement de la cabine
+;; Procédure de chargement de la cabine depuis les fichiers CSV
 ;; ------------------------------------------------------------------------------
 to load-aircraft-environment [ a-type ]
   let grid-filename ""
@@ -80,7 +27,7 @@ to load-aircraft-environment [ a-type ]
 
   ;; Redimensionner l'univers NetLogo aux dimensions exactes :
   ;; X : de 0 à (cabin-width - 1) -> 9 colonnes (0 à 8)
-  ;; Y : de 0 à (cabin-length - 1) -> l'avant de l'avion en haut (max-pycor)
+  ;; Y : de 0 à (cabin-length - 1) -> avant de l'avion en haut (max-pycor)
   resize-world 0 (cabin-width - 1) 0 (cabin-length - 1)
 
   ;; Remplissage des cellules depuis les matrices CSV
@@ -124,7 +71,7 @@ to load-aircraft-environment [ a-type ]
               set seat-row read-from-string row-str
             ]
 
-            ;; Identification des sorties de secours
+            ;; Identification des sorties de secours et classe affaires
             if a-type = "A320" and (seat-row = 12 or seat-row = 14) [
               set is-exit-row? true
             ]
@@ -151,7 +98,7 @@ to load-aircraft-environment [ a-type ]
     set row-idx row-idx + 1
   ]
 
-  ;; Calcul des indicateurs
+  ;; Calcul des indicateurs structurels
   set total-seats count patches with [ patch-type = "seat" ]
   set total-seat-rows length remove-duplicates [ seat-row ] of patches with [ patch-type = "seat" ]
 end
@@ -173,30 +120,30 @@ to update-visuals
   ask patches [
     (ifelse
       patch-type = "wall" [
-        set pcolor gray - 1       ;; Fuselage et cloisons : gris
+        set pcolor gray - 1       ;; Fuselage et cloisons : gris foncé
       ]
       patch-type = "aisle" [
-        set pcolor black          ;; Allée centrale praticable : noir
+        set pcolor black          ;; Allée centrale : noir
       ]
       patch-type = "door" [
         set pcolor green + 1      ;; Porte d'embarquement : vert vif
       ]
       patch-type = "seat" [
         ifelse is-business? [
-          set pcolor magenta      ;; Classe Affaires (B737 rangées 1-3) : magenta
+          set pcolor magenta      ;; Classe Affaires (B737) : magenta
         ] [
           ifelse is-exit-row? [
-            set pcolor cyan       ;; Sièges issus de secours (extra legroom) : cyan
+            set pcolor cyan       ;; Sorties de secours : cyan
           ] [
-            set pcolor sky        ;; Classe Économique standard : bleu ciel
+            set pcolor sky        ;; Classe Éco standard : bleu ciel
           ]
         ]
       ]
       [ set pcolor white ]
     )
 
-    ;; Affichage optionnel des identifiants (ex: "12A")
-    ifelse show-seat-labels? and patch-type = "seat" [
+    ;; Affichage optionnel des étiquettes (ex: "12A")
+    ifelse (is-boolean? show-seat-labels? and show-seat-labels?) and patch-type = "seat" [
       set plabel seat-id
       set plabel-color white
     ] [
@@ -214,27 +161,22 @@ to toggle-labels
 end
 
 ;; ------------------------------------------------------------------------------
-;; Utilitaires / Rapporteurs pour les futurs agents passagers
+;; Utilitaires / Rapporteurs pour l'environnement et les passagers
 ;; ------------------------------------------------------------------------------
-
-;; Trouve le patch d'un siège par son identifiant commercial (ex: "14B")
 to-report get-seat [ target-id ]
   report one-of patches with [ seat-id = target-id ]
 end
 
-;; Trouve le patch d'allée situé exactement en face du siège attribué
 to-report get-aisle-patch-for-seat [ target-id ]
   let target get-seat target-id
   if target = nobody [ report nobody ]
   report patch 4 ([ pycor ] of target)
 end
 
-;; Ensemble des patchs de sièges
 to-report seat-patches
   report patches with [ patch-type = "seat" ]
 end
 
-;; Ensemble des patchs d'allée
 to-report aisle-patches
   report patches with [ patch-type = "aisle" ]
 end
@@ -247,7 +189,7 @@ to print-cabin-summary
   print (word " Cabine chargée : " aircraft-type)
   print (word " Dimensions     : " cabin-width " colonnes x " cabin-length " rangées")
   print (word " Total sièges   : " total-seats " places")
-  print (word " Rangées sièges : " total-seat-rows " rangées commerciales distinctes")
+  print (word " Rangées sièges : " total-seat-rows " rangées distinctes")
   if door-patch != nobody [
     print (word " Porte d'entrée : patch [" [pxcor] of door-patch ", " [pycor] of door-patch "]")
   ]
