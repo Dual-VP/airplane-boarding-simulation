@@ -1,0 +1,259 @@
+;; ==============================================================================
+;; SIMULATION D'EMBARQUEMENT D'UN AVION COMMERCIAL
+;; Module d'initialisation de l'environnement depuis fichiers CSV (A320 & B737)
+;; ==============================================================================
+
+extensions [ csv ]
+
+;; ------------------------------------------------------------------------------
+;; Variables globales
+;; ------------------------------------------------------------------------------
+globals [
+  ;; Variables d'interface (à créer comme widgets dans NetLogo ou déclarer ici) :
+  ;; aircraft-type      ;; Chooser ("A320", "B737")
+  ;; show-seat-labels?  ;; Switch (true / false)
+
+  ;; Métriques & références de l'environnement
+  total-seats          ;; Nombre total de sièges détectés (178 pour A320, 144 pour B737)
+  cabin-length         ;; Nombre de rangées physiques (axe longitudinal Y : 41 pour A320, 35 pour B737)
+  cabin-width          ;; Nombre de colonnes physiques (axe transversal X : 9 colonnes)
+  door-patch           ;; Patch représentant la porte d'embarquement (point d'apparition)
+  total-seat-rows      ;; Nombre de rangées commerciales distinctes (31 pour A320, 25 pour B737)
+]
+
+;; ------------------------------------------------------------------------------
+;; Propriétés des patchs (cellules de la cabine)
+;; ------------------------------------------------------------------------------
+patches-own [
+  patch-type           ;; "wall", "aisle", "seat", "door"
+  seat-id              ;; Identifiant commercial du siège (ex: "12A", "1D"), "" si non-siège
+  seat-row             ;; Numéro de rangée commerciale (ex: 12), 0 si non-siège
+  seat-letter          ;; Lettre du siège ("A" à "F"), "" si non-siège
+  is-exit-row?         ;; Booléen : vrai pour les issues de secours (extra legroom)
+  is-business?         ;; Booléen : vrai pour les sièges Business (rangées 1-3 sur B737)
+  occupied?            ;; Booléen : vrai si un passager est assis ou présent sur le patch
+]
+
+;; ------------------------------------------------------------------------------
+;; Procédure principale de configuration
+;; ------------------------------------------------------------------------------
+to setup
+  clear-all
+  reset-ticks
+
+  ;; Valeur par défaut si non défini par un widget Chooser
+  if aircraft-type = 0 or aircraft-type = "" [
+    set aircraft-type "A320"
+  ]
+
+  ;; Chargement de la géométrie et des sièges depuis les CSV
+  load-aircraft-environment aircraft-type
+
+  ;; Coloration et étiquetage initial
+  update-visuals
+
+  ;; Affichage du bilan dans le centre de commande
+  print-cabin-summary
+end
+
+;; ------------------------------------------------------------------------------
+;; Procédure de chargement de la cabine
+;; ------------------------------------------------------------------------------
+to load-aircraft-environment [ a-type ]
+  let grid-filename ""
+  let labels-filename ""
+
+  ifelse a-type = "B737" [
+    set grid-filename resolve-data-path "B737_cabin.csv"
+    set labels-filename resolve-data-path "B737_cabin_labels.csv"
+  ] [
+    set grid-filename resolve-data-path "A320_cabin.csv"
+    set labels-filename resolve-data-path "A320_cabin_labels.csv"
+  ]
+
+  ;; Lecture des fichiers CSV
+  let raw-grid csv:from-file grid-filename
+  let raw-labels csv:from-file labels-filename
+
+  set cabin-length length raw-grid
+  set cabin-width length (item 0 raw-grid)
+
+  ;; Redimensionner l'univers NetLogo aux dimensions exactes :
+  ;; X : de 0 à (cabin-width - 1) -> 9 colonnes (0 à 8)
+  ;; Y : de 0 à (cabin-length - 1) -> l'avant de l'avion en haut (max-pycor)
+  resize-world 0 (cabin-width - 1) 0 (cabin-length - 1)
+
+  ;; Remplissage des cellules depuis les matrices CSV
+  let row-idx 0
+  foreach raw-grid [ grid-row-data ->
+    let labels-row-data item row-idx raw-labels
+    let col-idx 0
+
+    ;; En NetLogo, pycor = 0 est en bas et max-pycor est en haut.
+    ;; La rangée 0 du CSV (cockpit / avant) est donc placée à max-pycor.
+    let y-cor (cabin-length - 1 - row-idx)
+
+    foreach grid-row-data [ cell-value ->
+      let label-value item col-idx labels-row-data
+
+      ask patch col-idx y-cor [
+        set occupied? false
+        set is-exit-row? false
+        set is-business? false
+        set seat-id ""
+        set seat-row 0
+        set seat-letter ""
+
+        ;; Décodage du code numérique de la cellule
+        (ifelse
+          cell-value = 0 [
+            set patch-type "wall"
+          ]
+          cell-value = 1 [
+            set patch-type "aisle"
+          ]
+          cell-value = 2 [
+            set patch-type "seat"
+            set seat-id (word label-value)
+
+            ;; Extraction de la rangée (chiffres) et de la lettre (dernier caractère)
+            if length seat-id >= 2 [
+              let last-char last seat-id
+              set seat-letter last-char
+              let row-str substring seat-id 0 (length seat-id - 1)
+              set seat-row read-from-string row-str
+            ]
+
+            ;; Identification des sorties de secours
+            if a-type = "A320" and (seat-row = 12 or seat-row = 14) [
+              set is-exit-row? true
+            ]
+            if a-type = "B737" [
+              if (seat-row = 11 or seat-row = 12) [
+                set is-exit-row? true
+              ]
+              if (seat-row <= 3) [
+                set is-business? true
+              ]
+            ]
+          ]
+          cell-value = 3 [
+            set patch-type "door"
+            set door-patch self
+          ]
+          [
+            set patch-type "wall"
+          ]
+        )
+      ]
+      set col-idx col-idx + 1
+    ]
+    set row-idx row-idx + 1
+  ]
+
+  ;; Calcul des indicateurs
+  set total-seats count patches with [ patch-type = "seat" ]
+  set total-seat-rows length remove-duplicates [ seat-row ] of patches with [ patch-type = "seat" ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Résolution robuste du chemin des fichiers de données
+;; ------------------------------------------------------------------------------
+to-report resolve-data-path [ filename ]
+  if file-exists? filename [ report filename ]
+  if file-exists? (word "data/" filename) [ report (word "data/" filename) ]
+  if file-exists? (word "../data/" filename) [ report (word "../data/" filename) ]
+  error (word "Fichier introuvable : " filename)
+end
+
+;; ------------------------------------------------------------------------------
+;; Coloration et style visuel de la cabine
+;; ------------------------------------------------------------------------------
+to update-visuals
+  ask patches [
+    (ifelse
+      patch-type = "wall" [
+        set pcolor gray - 1       ;; Fuselage et cloisons : gris
+      ]
+      patch-type = "aisle" [
+        set pcolor black          ;; Allée centrale praticable : noir
+      ]
+      patch-type = "door" [
+        set pcolor green + 1      ;; Porte d'embarquement : vert vif
+      ]
+      patch-type = "seat" [
+        ifelse is-business? [
+          set pcolor magenta      ;; Classe Affaires (B737 rangées 1-3) : magenta
+        ] [
+          ifelse is-exit-row? [
+            set pcolor cyan       ;; Sièges issus de secours (extra legroom) : cyan
+          ] [
+            set pcolor sky        ;; Classe Économique standard : bleu ciel
+          ]
+        ]
+      ]
+      [ set pcolor white ]
+    )
+
+    ;; Affichage optionnel des identifiants (ex: "12A")
+    ifelse show-seat-labels? and patch-type = "seat" [
+      set plabel seat-id
+      set plabel-color white
+    ] [
+      set plabel ""
+    ]
+  ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Basculer l'affichage des identifiants de sièges
+;; ------------------------------------------------------------------------------
+to toggle-labels
+  set show-seat-labels? not show-seat-labels?
+  update-visuals
+end
+
+;; ------------------------------------------------------------------------------
+;; Utilitaires / Rapporteurs pour les futurs agents passagers
+;; ------------------------------------------------------------------------------
+
+;; Trouve le patch d'un siège par son identifiant commercial (ex: "14B")
+to-report get-seat [ target-id ]
+  report one-of patches with [ seat-id = target-id ]
+end
+
+;; Trouve le patch d'allée situé exactement en face du siège attribué
+to-report get-aisle-patch-for-seat [ target-id ]
+  let target get-seat target-id
+  if target = nobody [ report nobody ]
+  report patch 4 ([ pycor ] of target)
+end
+
+;; Ensemble des patchs de sièges
+to-report seat-patches
+  report patches with [ patch-type = "seat" ]
+end
+
+;; Ensemble des patchs d'allée
+to-report aisle-patches
+  report patches with [ patch-type = "aisle" ]
+end
+
+;; ------------------------------------------------------------------------------
+;; Bilan synthétique dans la console NetLogo
+;; ------------------------------------------------------------------------------
+to print-cabin-summary
+  print "========================================================"
+  print (word " Cabine chargée : " aircraft-type)
+  print (word " Dimensions     : " cabin-width " colonnes x " cabin-length " rangées")
+  print (word " Total sièges   : " total-seats " places")
+  print (word " Rangées sièges : " total-seat-rows " rangées commerciales distinctes")
+  if door-patch != nobody [
+    print (word " Porte d'entrée : patch [" [pxcor] of door-patch ", " [pycor] of door-patch "]")
+  ]
+  print (word " Sièges issues  : " count patches with [ is-exit-row? ])
+  if aircraft-type = "B737" [
+    print (word " Sièges affaires: " count patches with [ is-business? ])
+  ]
+  print "========================================================"
+end
